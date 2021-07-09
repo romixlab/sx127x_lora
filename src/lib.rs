@@ -180,6 +180,7 @@ pub enum Error<SPI, CS, RESET> {
     Reset(RESET),
     SPI(SPI),
     Transmitting,
+    BufferTooShort,
 }
 
 use Error::*;
@@ -271,8 +272,7 @@ where
 
     pub fn transmit_payload(
         &mut self,
-        buffer: [u8; 255],
-        payload_size: usize,
+        buffer: &[u8],
     ) -> Result<(), Error<E, CS::Error, RESET::Error>> {
         if self.transmitting()? {
             Err(Transmitting)
@@ -287,10 +287,10 @@ where
             self.write_register(Register::RegIrqFlags.addr(), 0)?;
             self.write_register(Register::RegFifoAddrPtr.addr(), 0)?;
             self.write_register(Register::RegPayloadLength.addr(), 0)?;
-            for byte in buffer.iter().take(payload_size) {
+            for byte in buffer.iter() {
                 self.write_register(Register::RegFifo.addr(), *byte)?;
             }
-            self.write_register(Register::RegPayloadLength.addr(), payload_size as u8)?;
+            self.write_register(Register::RegPayloadLength.addr(), buffer.len() as u8)?;
             self.set_mode(RadioMode::Tx)?;
             Ok(())
         }
@@ -335,18 +335,20 @@ where
 
     /// Returns the contents of the fifo as a fixed 255 u8 array. This should only be called is there is a
     /// new packet ready to be read.
-    pub fn read_packet(&mut self) -> Result<[u8; 255], Error<E, CS::Error, RESET::Error>> {
-        let mut buffer = [0 as u8; 255];
+    pub fn read_packet<'a>(&mut self, buf: &'a mut[u8]) -> Result<&'a [u8], Error<E, CS::Error, RESET::Error>> {
         self.clear_irq()?;
         let size = self.read_register(Register::RegRxNbBytes.addr())?;
+        if buf.len() < size as usize {
+            return Err(Error::BufferTooShort);
+        }
         let fifo_addr = self.read_register(Register::RegFifoRxCurrentAddr.addr())?;
         self.write_register(Register::RegFifoAddrPtr.addr(), fifo_addr)?;
-        for i in 0..size {
-            let byte = self.read_register(Register::RegFifo.addr())?;
-            buffer[i as usize] = byte;
+        for b in (&mut buf[0..size as usize]).into_iter() {
+            *b = self.read_register(Register::RegFifo.addr())?;
         }
         self.write_register(Register::RegFifoAddrPtr.addr(), 0)?;
-        Ok(buffer)
+        let buf = unsafe { core::slice::from_raw_parts(buf as *const _ as *const u8, size as usize) };
+        Ok(buf)
     }
 
     /// Returns true if the radio is currently transmitting a packet.
@@ -670,13 +672,14 @@ where
 
     pub fn put_in_fsk_mode(&mut self) -> Result<(), Error<E, CS::Error, RESET::Error>> {
         // Put in FSK mode
-        let op_mode: &mut u8 = 0x0
+        let mut reg = 0u8;
+        let op_mode: &mut u8 = reg
             .set_bit(7, false)  // FSK mode
             .set_bits(5..6, 0x00)   // FSK modulation
             .set_bit(3, false)  //Low freq registers
             .set_bits(0..2, 0b011); // Mode
 
-        self.write_register(Register::RegOpMode as u8, *op_mode)
+        self.write_register(Register::RegOpMode as u8, reg)
     }
 
     pub fn set_fsk_pa_ramp(
@@ -684,11 +687,12 @@ where
         modulation_shaping: FskDataModulationShaping,
         ramp: FskRampUpRamDown
     ) -> Result<(), Error<E, CS::Error, RESET::Error>> {
-        let pa_ramp: &mut u8 = 0x0
+        let mut reg = 0u8;
+        let pa_ramp: &mut u8 = reg
             .set_bits(5..6, modulation_shaping as u8)
             .set_bits(0..3, ramp as u8);
 
-        self.write_register(Register::RegPaRamp as u8, *pa_ramp)
+        self.write_register(Register::RegPaRamp as u8, reg)
     }
 }
 /// Modes of the radio and their corresponding register values.
